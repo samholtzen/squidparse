@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "squidparse"
+version = "0.1.0"
+description = "Pipeline for time-lapse and ISS microscopy image processing"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "Sam Holtzen", email = "sholtzen@caltech.edu" }
+]
+
+dependencies = [
+    "numpy",
+    "scikit-image",
+    "pyyaml",
+    "zarr",
+    "tifffile",
+    "pandas",
+    "tqdm",
+    "scipy",
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+segmentation = ["cellpose"]
+all = ["imaging-pipeline[segmentation]"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
