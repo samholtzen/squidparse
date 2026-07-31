@@ -29,4 +29,5 @@ segmentation = ["cellpose"]
 all = ["imaging-pipeline[segmentation]"]
 
 [tool.setuptools.packages.find]
-where = ["squidparse"]
+where = ["."]
+include = ["squidparse*"]
