@@ -7,6 +7,21 @@ This pipeline reads microscopy image data from disk, stores it in Zarr format, a
 - A time-lapse experiment. This is one acquisition folder with one frame subfolder for each time point.
 - An ISS experiment. This is a parent folder that contains many round folders. Each round folder is one acquisition folder.
 
+## Installation
+
+I have two install options: the first is the lightweight metadata handler and file transfer pipeline, which is the "core" pipeline. If you need segmentation of your images, Cellpose is available for segmentation using the `.[segmentation]` option during install.
+
+```python
+# core only
+pip install .
+
+# with segmentation support
+pip install ".[segmentation]"
+
+# editable install for development
+pip install -e ".[segmentation]"
+```
+
 ## Folder Structure
 
 ### Single Acquisition Folder
