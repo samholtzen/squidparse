@@ -1,0 +1,5 @@
+.venv/
+*.zarr
+gfp_movies/
+**/__pycache__/
+*.ipynb

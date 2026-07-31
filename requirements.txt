@@ -1,0 +1,10 @@
+numpy
+scikit-image
+pyyaml
+zarr
+tifffile
+pandas
+tqdm
+cellpose
+scipy
+matplotlib
