@@ -3,3 +3,4 @@
 gfp_movies/
 **/__pycache__/
 *.ipynb
+**/*.egg-info
