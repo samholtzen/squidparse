@@ -3,6 +3,7 @@ from skimage.registration import phase_cross_correlation
 import zarr
 from tqdm import tqdm
 import itertools
+from squidparse.metadata import AcquisitionMetadata
 
 def calculate_shift(
     movie: np.ndarray,
@@ -83,7 +84,7 @@ def calculate_shift(
     return shifts
 
 
-def register_plate(meta):
+def register_plate(meta: AcquisitionMetadata):
     """
     Compute per-well, per-position jitter offsets across time using the
     nuclear channel, and store them in a Zarr 'offsets' array.
@@ -97,7 +98,7 @@ def register_plate(meta):
     for well, p in tqdm(list(itertools.product(meta.wells, range(meta.P)))):
         z[well]['offsets'][p, :, :] = calculate_shift(
             z[well]['images'][:, p, 0, :1, :, :],
-            nuclear_channel=0
+            nuclear_channel=meta.nuc_channel
         )
 
 def crop_to_common_overlap(frames, offsets):

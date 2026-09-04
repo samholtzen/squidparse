@@ -17,9 +17,20 @@ class AcquisitionMetadata:
     and a single ISS round.
     """
 
-    def __init__(self, acqdir):
+    def __init__(
+            self, 
+            acqdir,
+            pseudobin=False,
+            nuc_channel = 0,
+            cyto_channel = 1,
+    ):
         self.acqdir = Path(acqdir)
+        self.pseudobin = pseudobin
+        self.nuc_channel = nuc_channel
+        self.cyto_channel = cyto_channel
+
         self._extract_metadata()
+        self._make_zarrfile_name()
 
     def _extract_metadata(self):
         # sort numerically so frame order is guaranteed, not iterdir()-order
@@ -41,6 +52,11 @@ class AcquisitionMetadata:
         self.channels = [c['name'] for c in self.metadata['channels']]
         self.C = len(self.channels)
 
+        if self.pseudobin:
+            self.mpp = self.metadata['objective']['pixel_size_um']*2
+        else:
+            self.mpp = self.metadata['objective']['pixel_size_um']
+
         self._get_image_size()
 
     @property
@@ -52,9 +68,16 @@ class AcquisitionMetadata:
         return self.metadata
 
     def _get_image_size(self):
+
         temp_path = self.image_path(self.wells[0], 0, 0, 0, 0)
+
         with tifffile.TiffFile(temp_path) as tif:
-            self.H, self.W = tif.shaped_metadata[0]['shape']
+            H, W= tif.shaped_metadata[0]['shape']
+
+        if self.pseudobin:
+            self.H, self.W = H//2, W//2
+        else:
+            self.H, self.W = H, W
 
     def _make_zarrfile_name(self):
         exp_dt = datetime.datetime.fromtimestamp(self.start_time)
@@ -89,15 +112,16 @@ class AcquisitionMetadata:
                 f'Image dimensions: {self._size()}')
 
 class TimeLapseMetadata(AcquisitionMetadata):
-    def __init__(self, expdir):
-        super().__init__(expdir)
+    def __init__(self, expdir, pseudobin=False
+):
+        super().__init__(expdir, pseudobin=pseudobin)
         self.expdir = self.acqdir
         self.exp_name = self.expdir.stem
         self._make_zarrfile_name()
 
 
 class ISSMetadata:
-    def __init__(self, expdir):
+    def __init__(self, expdir, pseudobin=False):
         self.expdir = Path(expdir)
         self.exp_name = self.expdir.stem
         self.zarrfile = f"{self.exp_name}.zarr"
@@ -105,7 +129,7 @@ class ISSMetadata:
         # parse every round as its own AcquisitionMetadata (T will be 1 for each,
         # since a round folder only ever contains the single '0' frame dir)
         round_dirs = [d for d in self.expdir.iterdir() if d.is_dir()]
-        rounds = [AcquisitionMetadata(d) for d in round_dirs]
+        rounds = [AcquisitionMetadata(d, pseudobin=pseudobin) for d in round_dirs]
 
         # sort rounds chronologically by acquisition start time
         self.rounds = sorted(rounds, key=lambda r: r.start_time)

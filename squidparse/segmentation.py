@@ -34,13 +34,19 @@ def segment_plate(meta):
     coords = list(itertools.product(meta.wells, range(meta.P), range(meta.T)))
     for well, p, t in tqdm(coords):
         z[well]['masks'][t, p, 0, 0], _, _ = model.eval(
-            z[well]['images'][t, p, 0, 0],
+            z[well]['images'][t, p, 0, meta.nuc_channel],
             cellprob_threshold=1.5
         )
-        z[well]['masks'][t, p, 0, 1], _, _ = model.eval(
-            np.sum(z[well]['images'][t, p, 0, 2:], axis=0),
-            cellprob_threshold=1.5
-        )
+        if isinstance(meta.cyto_channel, list):
+            z[well]['masks'][t, p, 0, 1], _, _ = model.eval(
+                np.sum(z[well]['images'][t, p, 0, meta.cyto_channel], axis=0),
+                cellprob_threshold=1.5
+            )
+        else:
+            z[well]['masks'][t, p, 0, 1], _, _ = model.eval(
+                z[well]['images'][t, p, 0, meta.cyto_channel],
+                cellprob_threshold=1.5
+            )
 
 def voronoi_mask(centroids, shape):
     """
