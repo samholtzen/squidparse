@@ -81,7 +81,7 @@ class AcquisitionMetadata:
 
     def _make_zarrfile_name(self):
         exp_dt = datetime.datetime.fromtimestamp(self.start_time)
-        self.zarrfile = exp_dt.strftime('%Y%m%d') + '.zarr'
+        self.zarrfile = exp_dt.strftime('%Y%m%d%H%M%S') + '.zarr'
 
     def _size(self):
         return (self.T, self.P, self.Z, self.C, self.H, self.W)
