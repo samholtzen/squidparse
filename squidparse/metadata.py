@@ -121,10 +121,19 @@ class TimeLapseMetadata(AcquisitionMetadata):
 
 
 class ISSMetadata:
-    def __init__(self, expdir, pseudobin=False):
+    def __init__(
+            self, 
+            expdir, 
+            pseudobin=False,
+            nuc_channel=0,
+            cyto_channel=1
+    ):
+        self.pseudobin = pseudobin
         self.expdir = Path(expdir)
         self.exp_name = self.expdir.stem
         self.zarrfile = f"{self.exp_name}.zarr"
+        self.nuc_channel = nuc_channel
+        self.cyto_channel = cyto_channel
 
         # parse every round as its own AcquisitionMetadata (T will be 1 for each,
         # since a round folder only ever contains the single '0' frame dir)
