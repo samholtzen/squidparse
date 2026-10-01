@@ -5,10 +5,10 @@ from tqdm import tqdm
 import itertools
 from scipy.spatial import cKDTree
 
-def segment_plate(meta):
+def segment_plate(meta, no_cyto=True):
     """
-    Run Cellpose segmentation per well/position/time, producing nuclear
-    (channel 0) and cytoplasmic-sum (channels 2+) masks.
+    Run Tracking software per well/position, producing tracked nuclear mask
+    (channel 0) and cytoplasmic-ring (channels 1) masks.
     Works for any metadata object exposing wells, P, T, Z, H, W, zarrfile.
     """
 
@@ -23,30 +23,46 @@ def segment_plate(meta):
     z = zarr.open(meta.zarrfile)
     model = models.CellposeModel(gpu=True)
 
-    for well in meta.wells:
-        z[well].zeros(
+    coords = list(itertools.product(meta.wells, range(meta.P)))
+
+    for well, p in tqdm(coords):
+
+        image = z[well][str(p)]['images'][:]
+
+        if no_cyto:
+            out_shape = (meta.T, 1, image.shape[-2], image.shape[-1])
+        else:
+            out_shape = (meta.T, 2, image.shape[-2], image.shape[-1])
+
+        masks = z[well][str(p)].require_array(
             name='masks',
-            shape=(meta.T, meta.P, meta.Z, 2, meta.H, meta.W),
-            chunks=(1, 1, meta.Z, 1, meta.H, meta.W),
+            shape=out_shape,
+            chunks = (1, 1, out_shape[-2], out_shape[-1]),
             dtype=np.uint16
         )
 
-    coords = list(itertools.product(meta.wells, range(meta.P), range(meta.T)))
-    for well, p, t in tqdm(coords):
-        z[well]['masks'][t, p, 0, 0], _, _ = model.eval(
-            z[well]['images'][t, p, 0, meta.nuc_channel],
-            cellprob_threshold=1.5
-        )
-        if isinstance(meta.cyto_channel, list):
-            z[well]['masks'][t, p, 0, 1], _, _ = model.eval(
-                np.sum(z[well]['images'][t, p, 0, meta.cyto_channel], axis=0),
+        for t in range(meta.T):
+
+            masks[t, 0], _, _ = model.eval(
+                image[t, meta.nuc_channel],
                 cellprob_threshold=1.5
             )
-        else:
-            z[well]['masks'][t, p, 0, 1], _, _ = model.eval(
-                z[well]['images'][t, p, 0, meta.cyto_channel],
-                cellprob_threshold=1.5
-            )
+
+            if not no_cyto:
+
+                if isinstance(meta.cyto_channel, list):
+                    # There are multiple channels asked to be used as source of segmentation
+                    # Add them together and send to cellpose for segmentation
+                    masks[t, 1], _, _ = model.eval(
+                        np.sum(image[t, meta.cyto_channel], axis=0),
+                        cellprob_threshold=1.5
+                    )
+                    
+                else:
+                    masks[t, 1], _, _ = model.eval(
+                        image[t, meta.cyto_channel],
+                        cellprob_threshold=1.5
+                    )
 
 def voronoi_mask(centroids, shape):
     """
