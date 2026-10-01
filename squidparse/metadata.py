@@ -3,7 +3,47 @@ import tifffile
 import datetime
 import pandas as pd
 import itertools
+import zarr
 from pathlib import Path
+
+
+def _is_zarr(path):
+    return Path(path).suffix == '.zarr'
+
+
+def _read_zarr_info(zarrpath):
+    """
+    Recover the descriptive info normally parsed from a raw acquisition
+    folder, from a zarr written by make_zarr. Uses the 'squidparse' attrs
+    when present; for older stores falls back to the raw 'acquisition' attrs
+    plus the shapes of the stored arrays.
+    """
+    zarrpath = Path(zarrpath)
+    if not zarrpath.exists():
+        raise FileNotFoundError(f"Zarr store not found: {zarrpath}")
+    z = zarr.open(str(zarrpath), mode='r')
+    info = dict(z.attrs.get('squidparse', {}))
+    acquisition = z.attrs.get('acquisition')
+    info['acquisition'] = acquisition
+    wells = info.get('wells') or [name for name, _ in z.groups()]
+    well = z[wells[0]]
+    fov_names = [k for k, _ in well.groups()]
+    # stored images are cropped to the registration overlap, so report their
+    # shape (of the first FOV) rather than the raw frame size
+    T, C, H, W = well[fov_names[0]]['images'].shape
+    info.update(T=T, C=C, H=H, W=W)
+    if 'wells' in info:
+        return info
+
+    # legacy store: reconstruct from acquisition attrs
+    first = acquisition[0] if isinstance(acquisition, list) else acquisition
+    info.update(
+        wells=wells, P=len(fov_names),
+        Z=first['z_stack']['nz'],
+        channels=[c['name'] for c in first['channels']],
+        mpp=first['objective']['pixel_size_um'],
+    )
+    return info
 
 
 class AcquisitionMetadata:
@@ -20,17 +60,44 @@ class AcquisitionMetadata:
     def __init__(
             self, 
             acqdir,
-            pseudobin=False,
-            nuc_channel = 0,
-            cyto_channel = 1,
+            pseudobin=None,
+            nuc_channel=None,
+            cyto_channel=None,
     ):
+        """
+        acqdir may be a raw acquisition folder or a zarr store written by
+        make_zarr. For a zarr, descriptive info is read from the store and
+        unspecified (None) pseudobin/nuc_channel/cyto_channel take the
+        stored values; image_path()/path_dataframe() are unavailable.
+        """
         self.acqdir = Path(acqdir)
-        self.pseudobin = pseudobin
-        self.nuc_channel = nuc_channel
-        self.cyto_channel = cyto_channel
+        self.from_zarr = _is_zarr(self.acqdir)
 
-        self._extract_metadata()
-        self._make_zarrfile_name()
+        if self.from_zarr:
+            self._extract_from_zarr(pseudobin, nuc_channel, cyto_channel)
+        else:
+            self.pseudobin = bool(pseudobin)
+            self.nuc_channel = 0 if nuc_channel is None else nuc_channel
+            self.cyto_channel = 1 if cyto_channel is None else cyto_channel
+            self._extract_metadata()
+            self._make_zarrfile_name()
+
+    def _extract_from_zarr(self, pseudobin, nuc_channel, cyto_channel):
+        info = _read_zarr_info(self.acqdir)
+        acq = info['acquisition']
+        if isinstance(acq, list):
+            raise ValueError(f"{self.acqdir} holds multiple rounds; use ISSMetadata")
+
+        self.metadata = acq
+        self.wells = info['wells']
+        self.T, self.P, self.Z, self.C = info['T'], info['P'], info['Z'], info['C']
+        self.H, self.W = info['H'], info['W']
+        self.channels = info['channels']
+        self.mpp = info['mpp']
+        self.pseudobin = info.get('pseudobin', False) if pseudobin is None else pseudobin
+        self.nuc_channel = info.get('nuc_channel', 0) if nuc_channel is None else nuc_channel
+        self.cyto_channel = info.get('cyto_channel', 1) if cyto_channel is None else cyto_channel
+        self.zarrfile = str(self.acqdir)
 
     def _extract_metadata(self):
         # sort numerically so frame order is guaranteed, not iterdir()-order
@@ -67,6 +134,17 @@ class AcquisitionMetadata:
     def zarr_attrs(self):
         return self.metadata
 
+    @property
+    def zarr_info(self):
+        """Everything needed to rebuild this object from the zarr alone."""
+        return dict(
+            kind='acquisition',
+            wells=self.wells, T=self.T, P=self.P, Z=self.Z, C=self.C,
+            H=self.H, W=self.W, channels=self.channels, mpp=self.mpp,
+            pseudobin=self.pseudobin, nuc_channel=self.nuc_channel,
+            cyto_channel=self.cyto_channel,
+        )
+
     def _get_image_size(self):
 
         temp_path = self.image_path(self.wells[0], 0, 0, 0, 0)
@@ -87,6 +165,8 @@ class AcquisitionMetadata:
         return (self.T, self.P, self.Z, self.C, self.H, self.W)
 
     def image_path(self, well, T, P, Z, C):
+        if self.from_zarr:
+            raise RuntimeError("Raw image paths are unavailable: metadata was loaded from a zarr")
         if not (0 <= T < self.T and 0 <= P < self.P and 0 <= Z < self.Z
                 and 0 <= C < self.C and well in self.wells):
             raise IndexError(f"Coordinate out of range: {well, T, P, Z, C}")
@@ -96,6 +176,8 @@ class AcquisitionMetadata:
         return frame_dir / f'{well}_{P}_{Z}_{channel_name}.tiff'
 
     def path_dataframe(self):
+        if self.from_zarr:
+            raise RuntimeError("Raw image paths are unavailable: metadata was loaded from a zarr")
         all_coords = itertools.product(
             self.wells, range(self.T), range(self.P), range(self.Z), range(self.C)
         )
@@ -112,33 +194,44 @@ class AcquisitionMetadata:
                 f'Image dimensions: {self._size()}')
 
 class TimeLapseMetadata(AcquisitionMetadata):
-    def __init__(self, expdir, pseudobin=False
-):
-        super().__init__(expdir, pseudobin=pseudobin)
+    def __init__(self, expdir, pseudobin=None, nuc_channel=None, cyto_channel=None):
+        super().__init__(expdir, pseudobin=pseudobin,
+                         nuc_channel=nuc_channel, cyto_channel=cyto_channel)
         self.expdir = self.acqdir
         self.exp_name = self.expdir.stem
-        self._make_zarrfile_name()
+        if not self.from_zarr:
+            self._make_zarrfile_name()
 
 
 class ISSMetadata:
     def __init__(
             self, 
             expdir, 
-            pseudobin=False,
-            nuc_channel=0,
-            cyto_channel=1
+            pseudobin=None,
+            nuc_channel=None,
+            cyto_channel=None
     ):
-        self.pseudobin = pseudobin
+        """
+        expdir may be a raw experiment folder (one subfolder per round) or a
+        zarr store written by make_zarr; see AcquisitionMetadata.
+        """
         self.expdir = Path(expdir)
         self.exp_name = self.expdir.stem
+        self.from_zarr = _is_zarr(self.expdir)
+
+        if self.from_zarr:
+            self._extract_from_zarr(pseudobin, nuc_channel, cyto_channel)
+            return
+
+        self.pseudobin = bool(pseudobin)
         self.zarrfile = f"{self.exp_name}.zarr"
-        self.nuc_channel = nuc_channel
-        self.cyto_channel = cyto_channel
+        self.nuc_channel = 0 if nuc_channel is None else nuc_channel
+        self.cyto_channel = 1 if cyto_channel is None else cyto_channel
 
         # parse every round as its own AcquisitionMetadata (T will be 1 for each,
         # since a round folder only ever contains the single '0' frame dir)
         round_dirs = [d for d in self.expdir.iterdir() if d.is_dir()]
-        rounds = [AcquisitionMetadata(d, pseudobin=pseudobin) for d in round_dirs]
+        rounds = [AcquisitionMetadata(d, pseudobin=self.pseudobin) for d in round_dirs]
 
         # sort rounds chronologically by acquisition start time
         self.rounds = sorted(rounds, key=lambda r: r.start_time)
@@ -150,6 +243,24 @@ class ISSMetadata:
         # validate consistency across rounds and pull shared attrs from round 0
         self._validate_and_set_shared_attrs()
 
+    def _extract_from_zarr(self, pseudobin, nuc_channel, cyto_channel):
+        info = _read_zarr_info(self.expdir)
+        acq = info['acquisition']
+        if not isinstance(acq, list):
+            raise ValueError(f"{self.expdir} holds a single acquisition; use AcquisitionMetadata")
+
+        self.round_meta = acq
+        self.rounds = None  # per-round AcquisitionMetadata only exist for raw folders
+        self.round_dirs = None
+        self.start_times = [m['acquisition']['start_time'] for m in acq]
+        self.T, self.P, self.Z, self.C = info['T'], info['P'], info['Z'], info['C']
+        self.H, self.W = info['H'], info['W']
+        self.wells, self.channels, self.mpp = info['wells'], info['channels'], info['mpp']
+        self.pseudobin = info.get('pseudobin', False) if pseudobin is None else pseudobin
+        self.nuc_channel = info.get('nuc_channel', 0) if nuc_channel is None else nuc_channel
+        self.cyto_channel = info.get('cyto_channel', 1) if cyto_channel is None else cyto_channel
+        self.zarrfile = str(self.expdir)
+
     def _validate_and_set_shared_attrs(self):
         ref = self.rounds[0]
         for r in self.rounds[1:]:
@@ -159,11 +270,15 @@ class ISSMetadata:
         self.wells, self.P, self.Z = ref.wells, ref.P, ref.Z
         self.channels, self.C = ref.channels, ref.C
         self.H, self.W = ref.H, ref.W
+        self.mpp = ref.mpp
+        self.start_times = [r.start_time for r in self.rounds]
 
     def _size(self):
         return (self.T, self.P, self.Z, self.C, self.H, self.W)
 
     def image_path(self, well, T, P, Z, C):
+        if self.from_zarr:
+            raise RuntimeError("Raw image paths are unavailable: metadata was loaded from a zarr")
         # T indexes which round; each round's own internal T is always 0
         return self.rounds[T].image_path(well, 0, P, Z, C)
     
@@ -172,6 +287,8 @@ class ISSMetadata:
         return self.round_meta
 
     def path_dataframe(self):
+        if self.from_zarr:
+            raise RuntimeError("Raw image paths are unavailable: metadata was loaded from a zarr")
         all_coords = itertools.product(
             self.wells, range(self.T), range(self.P), range(self.Z), range(self.C)
         )

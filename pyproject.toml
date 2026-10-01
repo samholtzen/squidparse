@@ -7,7 +7,7 @@ name = "squidparse"
 version = "0.1.0"
 description = "Pipeline for time-lapse and ISS microscopy image processing"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">3.10"
 authors = [
     { name = "Sam Holtzen", email = "sholtzen@caltech.edu" }
 ]

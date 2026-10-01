@@ -1,6 +1,7 @@
 from .metadata import AcquisitionMetadata, TimeLapseMetadata, ISSMetadata
 from .zarr_io import make_zarr
-from .registration import calculate_shift, register_plate, crop_to_common_overlap
+from . import utils
+from .utils import calculate_shift, crop_to_common_overlap
 
 __all__ = [
     "AcquisitionMetadata",
@@ -8,6 +9,6 @@ __all__ = [
     "ISSMetadata",
     "make_zarr",
     "calculate_shift",
-    "register_plate",
+    "utils",
     "crop_to_common_overlap",
 ]

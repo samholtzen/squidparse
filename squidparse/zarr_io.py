@@ -3,8 +3,7 @@ import tifffile
 from tqdm import tqdm
 import numpy as np
 import itertools
-from live_cell_utils.utils import fast_illum, fast_rolling_ball
-from live_cell_utils.utils import calculate_shift, crop_to_common_overlap
+from squidparse.utils import fast_rolling_ball, calculate_shift, crop_to_common_overlap
 
 def bin_2x2(img):
     """
@@ -23,10 +22,14 @@ def make_zarr(meta):
     """
     Build a Zarr store from any metadata object exposing the common
     AcquisitionMetadata-like interface: wells, T, P, Z, C, H, W,
-    zarrfile, zarr_attrs, and path_dataframe().
+    zarrfile, zarr_attrs, zarr_info, and path_dataframe().
     """
+    if meta.from_zarr:
+        raise ValueError("Metadata was loaded from a zarr; raw images are needed to build one")
+
     z = zarr.open(meta.zarrfile)
     z.attrs['acquisition'] = meta.zarr_attrs
+    z.attrs['squidparse'] = meta.zarr_info
 
     df = meta.path_dataframe()
 
