@@ -26,6 +26,8 @@ dependencies = [
 
 [project.optional-dependencies]
 segmentation = ["cellpose"]
+nd2 = ["nd2", "dask"]
+stitch = ["tilefusion", "tensorstore"]
 all = ["imaging-pipeline[segmentation]"]
 
 [tool.setuptools.packages.find]

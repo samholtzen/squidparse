@@ -1,3 +1,5 @@
+import re
+import numpy as np
 import yaml
 import tifffile
 import datetime
@@ -63,12 +65,17 @@ class AcquisitionMetadata:
             pseudobin=None,
             nuc_channel=None,
             cyto_channel=None,
+            stitch=False,
     ):
         """
         acqdir may be a raw acquisition folder or a zarr store written by
         make_zarr. For a zarr, descriptive info is read from the store and
         unspecified (None) pseudobin/nuc_channel/cyto_channel take the
         stored values; image_path()/path_dataframe() are unavailable.
+
+        stitch=True stitches the P overlapping FOVs of each well into one mosaic when
+        make_zarr runs (before registration). The metadata then reports P = 1, since the
+        zarr holds a single stitched FOV '0' per well; `n_tiles` keeps the raw FOV count.
         """
         self.acqdir = Path(acqdir)
         self.from_zarr = _is_zarr(self.acqdir)
@@ -79,7 +86,11 @@ class AcquisitionMetadata:
             self.pseudobin = bool(pseudobin)
             self.nuc_channel = 0 if nuc_channel is None else nuc_channel
             self.cyto_channel = 1 if cyto_channel is None else cyto_channel
+            self.stitch = bool(stitch)
             self._extract_metadata()
+            self.n_tiles = self.P
+            if self.stitch:
+                self.P = 1
             self._make_zarrfile_name()
 
     def _extract_from_zarr(self, pseudobin, nuc_channel, cyto_channel):
@@ -97,6 +108,8 @@ class AcquisitionMetadata:
         self.pseudobin = info.get('pseudobin', False) if pseudobin is None else pseudobin
         self.nuc_channel = info.get('nuc_channel', 0) if nuc_channel is None else nuc_channel
         self.cyto_channel = info.get('cyto_channel', 1) if cyto_channel is None else cyto_channel
+        self.stitch = info.get('stitch', False)
+        self.n_tiles = info.get('n_tiles', self.P)
         self.zarrfile = str(self.acqdir)
 
     def _extract_metadata(self):
@@ -111,9 +124,11 @@ class AcquisitionMetadata:
             self.metadata = yaml.safe_load(f)
 
         coord_df = pd.read_csv(self.acqdir / 'coordinates.csv')
+        self.coord_df = coord_df
         wells_counts = coord_df['region'].value_counts()
         self.wells = wells_counts.keys().to_list()
         self.P = wells_counts.values[0].item()
+        self.n_tiles = self.P
 
         self.Z = self.metadata['z_stack']['nz']
         self.channels = [c['name'] for c in self.metadata['channels']]
@@ -142,8 +157,13 @@ class AcquisitionMetadata:
             wells=self.wells, T=self.T, P=self.P, Z=self.Z, C=self.C,
             H=self.H, W=self.W, channels=self.channels, mpp=self.mpp,
             pseudobin=self.pseudobin, nuc_channel=self.nuc_channel,
-            cyto_channel=self.cyto_channel,
+            cyto_channel=self.cyto_channel, stitch=self.stitch, n_tiles=self.n_tiles,
         )
+
+    def fov_positions(self, well):
+        """Stage (y_um, x_um) of each of the well's FOVs, in P order (from coordinates.csv)."""
+        rows = self.coord_df[self.coord_df['region'] == well]
+        return rows['y (mm)'].to_numpy() * 1000, rows['x (mm)'].to_numpy() * 1000
 
     def _get_image_size(self):
 
@@ -167,7 +187,7 @@ class AcquisitionMetadata:
     def image_path(self, well, T, P, Z, C):
         if self.from_zarr:
             raise RuntimeError("Raw image paths are unavailable: metadata was loaded from a zarr")
-        if not (0 <= T < self.T and 0 <= P < self.P and 0 <= Z < self.Z
+        if not (0 <= T < self.T and 0 <= P < self.n_tiles and 0 <= Z < self.Z
                 and 0 <= C < self.C and well in self.wells):
             raise IndexError(f"Coordinate out of range: {well, T, P, Z, C}")
 
@@ -179,7 +199,7 @@ class AcquisitionMetadata:
         if self.from_zarr:
             raise RuntimeError("Raw image paths are unavailable: metadata was loaded from a zarr")
         all_coords = itertools.product(
-            self.wells, range(self.T), range(self.P), range(self.Z), range(self.C)
+            self.wells, range(self.T), range(self.n_tiles), range(self.Z), range(self.C)
         )
         df = pd.DataFrame(all_coords, columns=['well', 'T', 'P', 'Z', 'C'])
         df['image_dir'] = [
@@ -193,10 +213,117 @@ class AcquisitionMetadata:
                 f'Channels: {self.channels}\n'
                 f'Image dimensions: {self._size()}')
 
+def _nd2_well_name(path):
+    """'WellB05_ChannelNew,...nd2' -> 'B5' (unpadded, like the Squid well names)."""
+    m = re.match(r'Well([A-Z])0*(\d+)', Path(path).name)
+    if m is None:
+        raise ValueError(f"cannot parse a well name from {path}")
+    return f'{m.group(1)}{m.group(2)}'
+
+
+class ND2Metadata(AcquisitionMetadata):
+    """
+    Parses Nikon ND2 files, one file per well, each holding that well's FOVs:
+        <acqdir>/
+            Well<A01>_....nd2, Well<A02>_....nd2, ...
+    acqdir may also be a single .nd2 file. Same interface as AcquisitionMetadata
+    (so segment_plate / track_plate / extract_features work on the resulting zarr),
+    but the raw images come from the ND2s: use `make_zarr_nd2`, not `make_zarr`.
+    Z stacks are not supported. Needs the `nd2` package.
+    """
+
+    def _extract_metadata(self):
+        import nd2
+
+        if self.acqdir.suffix.lower() == '.nd2':
+            files = [self.acqdir]
+        else:
+            files = sorted(self.acqdir.glob('*.nd2'))
+        if not files:
+            raise FileNotFoundError(f"No .nd2 files found in {self.acqdir}")
+        self.nd2_files = {_nd2_well_name(f): f for f in files}
+        if len(self.nd2_files) != len(files):
+            raise ValueError("Two ND2 files map to the same well")
+        self.wells = list(self.nd2_files)
+
+        shapes, starts, self._fov_pos = {}, [], {}
+        for well, path in self.nd2_files.items():
+            with nd2.ND2File(path) as f:
+                sizes = dict(f.sizes)
+                if 'Z' in sizes:
+                    raise NotImplementedError(f"Z stacks are not supported: {path}")
+                shapes[well] = (
+                    int(sizes.get('T', 1)), int(sizes.get('P', 1)), int(sizes.get('C', 1)),
+                    int(sizes['Y']), int(sizes['X']),
+                    tuple(c.channel.name for c in f.metadata.channels),
+                    float(f.voxel_size().x),
+                )
+                starts.append(self._nd2_start_time(f, path))
+                self._fov_pos[well] = self._nd2_positions(f, int(sizes.get('P', 1)), path)
+
+        ref_well = self.wells[0]
+        for well, shape in shapes.items():
+            if shape != shapes[ref_well]:
+                raise ValueError(f"ND2 for well {well} does not match well {ref_well}")
+
+        self.T, self.P, self.C, H, W, channels, mpp = shapes[ref_well]
+        self.Z = 1
+        self.channels = list(channels)
+        if self.pseudobin:
+            if H % 2 or W % 2:
+                raise ValueError("pseudobin needs even image dimensions")
+            self.H, self.W, self.mpp = H // 2, W // 2, mpp * 2
+        else:
+            self.H, self.W, self.mpp = H, W, mpp
+
+        # keep the Squid acquisition.yaml keys the zarr readers look for
+        self.metadata = dict(
+            source='nd2',
+            files={w: str(p) for w, p in self.nd2_files.items()},
+            objective=dict(pixel_size_um=mpp),
+            z_stack=dict(nz=1),
+            channels=[dict(name=n) for n in self.channels],
+            acquisition=dict(start_time=min(starts)),
+        )
+
+    @staticmethod
+    def _nd2_positions(f, n_p, path):
+        """Stage (y_um, x_um) per FOV (first time point). Single-FOV files have no stage loop."""
+        xs, ys = np.full(n_p, np.nan), np.full(n_p, np.nan)
+        for e in f.events():
+            p = e.get('P Index')
+            if p is not None and np.isnan(xs[int(p)]):
+                xs[int(p)], ys[int(p)] = e['X Coord [µm]'], e['Y Coord [µm]']
+        if n_p > 1 and (np.isnan(xs).any() or np.isnan(ys).any()):
+            raise ValueError(f"missing stage positions for some FOVs in {path}")
+        return ys, xs
+
+    def fov_positions(self, well):
+        """Stage (y_um, x_um) of each of the well's FOVs, in P order (from the ND2 events)."""
+        return self._fov_pos[well]
+
+    @staticmethod
+    def _nd2_start_time(f, path):
+        """Acquisition start as a unix timestamp; falls back to the file mtime."""
+        date = f.text_info.get('date', '')
+        for fmt in ('%m/%d/%Y %I:%M:%S %p', '%d/%m/%Y %I:%M:%S %p', '%m/%d/%Y %H:%M:%S'):
+            try:
+                return datetime.datetime.strptime(date.strip(), fmt).timestamp()
+            except ValueError:
+                pass
+        return Path(path).stat().st_mtime
+
+    def image_path(self, well, T, P, Z, C):
+        raise RuntimeError("ND2Metadata has no per-image files; use nd2_files[well] and make_zarr_nd2")
+
+    def path_dataframe(self):
+        raise RuntimeError("ND2Metadata has no per-image files; use nd2_files[well] and make_zarr_nd2")
+
+
 class TimeLapseMetadata(AcquisitionMetadata):
-    def __init__(self, expdir, pseudobin=None, nuc_channel=None, cyto_channel=None):
+    def __init__(self, expdir, pseudobin=None, nuc_channel=None, cyto_channel=None, stitch=False):
         super().__init__(expdir, pseudobin=pseudobin,
-                         nuc_channel=nuc_channel, cyto_channel=cyto_channel)
+                         nuc_channel=nuc_channel, cyto_channel=cyto_channel, stitch=stitch)
         self.expdir = self.acqdir
         self.exp_name = self.expdir.stem
         if not self.from_zarr:

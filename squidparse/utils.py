@@ -7,7 +7,7 @@ from skimage.restoration import rolling_ball
 from skimage.filters import gaussian
 
 from skimage.segmentation import expand_labels
-from scipy.ndimage import uniform_filter1d
+from scipy.ndimage import uniform_filter1d, distance_transform_edt
 
 from skimage.registration import phase_cross_correlation
 
@@ -203,15 +203,31 @@ def fast_illum(image, sigma=200, downscale=4):
     
     return image / bg
 
-def fast_rolling_ball(image, radius=50, downscale=4):
+def fast_rolling_ball(image, radius=50, downscale=4, valid=None):
+    """Rolling-ball background subtraction on a downscaled copy of `image`.
+
+    valid: optional boolean mask of real pixels. Empty pixels (e.g. the padding around a
+    stitched mosaic) are filled with the nearest valid value before the background is
+    estimated, so they do not drag the background down near the edges, and they are set to
+    0 in the output.
+    """
     small = resize(image, 
                     (image.shape[0] // downscale, image.shape[1] // downscale),
                     preserve_range=True, anti_aliasing=True)
+
+    if valid is not None:
+        # only pixels whose whole downscaled block is valid count as real
+        small_valid = resize(valid.astype(np.float32), small.shape, anti_aliasing=True) > 0.99
+        nearest = distance_transform_edt(~small_valid, return_distances=False, return_indices=True)
+        small = small[tuple(nearest)]
     
     small_bg = rolling_ball(small, radius=radius / downscale)
     
     bg = resize(small_bg, image.shape, preserve_range=True, anti_aliasing=False) + 1
-    return np.clip(image - bg, 1, (2**16)-1)
+    out = np.clip(image - bg, 1, (2**16)-1)
+    if valid is not None:
+        out[~valid] = 0
+    return out
 
 def movmean(array, size=3):
     arr_smooth = uniform_filter1d(array, size=size, axis=0)

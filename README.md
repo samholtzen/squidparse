@@ -2,10 +2,11 @@
 
 ## Overview
 
-This pipeline reads microscopy image data from disk, stores it in Zarr format, and processes it. The pipeline supports two experiment types:
+This pipeline reads microscopy image data from disk, stores it in Zarr format, and processes it. The pipeline supports these experiment types:
 
 - A time-lapse experiment. This is one acquisition folder with one frame subfolder for each time point.
 - An ISS experiment. This is a parent folder that contains many round folders. Each round folder is one acquisition folder.
+- An ND2 experiment. This is a folder of Nikon `.nd2` files, one per well. See `ND2Metadata`.
 
 ## Installation
 
@@ -17,6 +18,12 @@ pip install .
 
 # with segmentation support
 pip install ".[segmentation]"
+
+# with ND2 support (nd2, dask)
+pip install ".[nd2]"
+
+# with stitching support (tilefusion, tensorstore)
+pip install ".[stitch]"
 
 # editable install for development
 pip install -e ".[segmentation]"
@@ -50,6 +57,19 @@ An ISS experiment folder has this structure:
 
 Each round folder is a single acquisition folder, as described above. In an ISS experiment, each round has exactly one frame subfolder. The pipeline treats each round as one time point.
 
+### ND2 Folder
+
+An ND2 folder has this structure:
+
+```
+<nd2dir>/
+    Well<A01>_....nd2        <- one file per well
+    Well<A02>_....nd2
+    ...
+```
+
+Each file holds all the FOVs (`P`), channels (`C`), and time points (`T`) of one well. The well name comes from the file name, so `WellB05_...nd2` becomes well `B5`.
+
 ## Metadata Classes
 
 ### AcquisitionMetadata
@@ -78,9 +98,19 @@ Create an `ISSMetadata` object with one call:
 meta = ISSMetadata(expdir)
 ```
 
+### ND2Metadata
+
+`ND2Metadata` reads a folder of ND2 files, or a single `.nd2` file. It extends `AcquisitionMetadata`, so it has the same attributes and the same `pseudobin`, `nuc_channel`, and `cyto_channel` options. It reads the image size, the channel names, the pixel size, and the acquisition start time from the ND2 files. It raises a `ValueError` if the wells do not share the same T, P, C, image size, and channels. Z stacks are not supported and raise a `NotImplementedError`.
+
+```python
+meta = ND2Metadata(nd2dir, pseudobin=True)
+```
+
+The raw images come from the ND2 files, not from per-image TIFFs. `image_path` and `path_dataframe` raise a `RuntimeError`. Use `meta.nd2_files[well]` to get the path of a well's file, and build the Zarr with `make_zarr_nd2`.
+
 ## Common Interface
 
-Both `TimeLapseMetadata` and `ISSMetadata` expose the same attributes and methods. This lets the pipeline functions work with either class.
+`TimeLapseMetadata`, `ISSMetadata`, and `ND2Metadata` expose the same attributes and methods. This lets the pipeline functions work with either class.
 
 Attributes:
 - `wells`: list of well names
@@ -89,9 +119,20 @@ Attributes:
 - `zarr_attrs`: metadata to store in the Zarr file
 
 Methods:
-- `image_path(well, T, P, Z, C)`: return the file path for one image
-- `path_dataframe()`: return a table of every image coordinate and path
+- `image_path(well, T, P, Z, C)`: return the file path for one image (not available for `ND2Metadata`)
+- `path_dataframe()`: return a table of every image coordinate and path (not available for `ND2Metadata`)
 - `_size()`: return the shape `(T, P, Z, C, H, W)`
+
+### Stitching overlapping FOVs
+
+If each well is imaged as a grid of overlapping FOVs, create the metadata with `stitch=True`:
+
+```python
+meta = AcquisitionMetadata(acqdir, pseudobin=True, stitch=True)   # or ND2Metadata(...)
+make_zarr(meta)   # or make_zarr_nd2(meta)
+```
+
+`make_zarr` then stitches the FOVs of each well with TileFusion before registration. It registers the tiles on the first time point, reuses that registration for every frame, and fuses each frame. The mosaic then goes through the usual jitter registration, crop, and background subtraction. The Zarr holds one stitched FOV, `<well>/0/images`, and the metadata reports `P = 1` (`meta.n_tiles` keeps the raw FOV count). `<well>/0` also has a `stitching` attribute with the tile origins. FOV positions come from `coordinates.csv` (or from the ND2 stage events). Pass `correction="nominal"` to `make_zarr` to fuse at the stage positions without registration. Needs the `stitch` extra.
 
 ## Pipeline Functions
 
@@ -103,6 +144,14 @@ If an expected image file does not exist, `make_zarr` raises a `FileNotFoundErro
 
 ```python
 make_zarr(meta)
+```
+
+### make_zarr_nd2(meta)
+
+`make_zarr_nd2` is the ND2 version of `make_zarr`. It takes an `ND2Metadata` object and writes the same Zarr layout: one group per well, one group per FOV, and `images` and `offsets` arrays in each FOV. It applies the same jitter registration, crop to the common overlap, and background subtraction as `make_zarr`. It needs the `nd2` and `dask` packages (`pip install ".[nd2]"`).
+
+```python
+make_zarr_nd2(meta)
 ```
 
 ### register_plate(meta)
@@ -156,6 +205,14 @@ register_plate(meta)
 segment_plate(meta)
 ```
 
+Example for an ND2 experiment:
+
+```python
+meta = ND2Metadata(nd2dir, pseudobin=True)
+make_zarr_nd2(meta)
+segment_plate(meta)
+```
+
 Example for an ISS experiment:
 
 ```python
@@ -177,3 +234,4 @@ segment_plate(meta)
 - cellpose
 - scipy
 - matplotlib
+- nd2 and dask (optional, for ND2 files)
