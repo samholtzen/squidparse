@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 
 import zarr
@@ -191,17 +193,69 @@ def calculate_shift(
     return shifts
 
 
-def fast_illum(image, sigma=200, downscale=4):
-    small = resize(image, 
-                    (image.shape[0] // downscale, image.shape[1] // downscale),
-                    preserve_range=True, anti_aliasing=True)
-    
-    small_bg = gaussian(small, sigma=sigma, preserve_range=True, mode='reflect')
-    
-    bg = resize(small_bg, image.shape, preserve_range=True, anti_aliasing=False)
-    bg = bg/bg.max()
-    
-    return image / bg
+def estimate_flat_field(images, downscale=4, sigma=200, clip_percentile=99, min_gain_denominator=0.05):
+    """Empirical flat field from one or more 2D images that share the same illumination.
+
+    Each image is downscaled and divided by its own median (so images of different overall
+    brightness count equally); its brightest pixels (cells, debris) and empty (0) pixels
+    are ignored. With several images the pixelwise median keeps only what they have in
+    common, the illumination profile, since cells fall at different places in each. The
+    profile is then smoothed with a masked (normalised) Gaussian, so the ignored pixels do
+    not pull it towards zero.
+
+    images: a 2D array, or an iterable of 2D arrays of the same shape (a generator is fine;
+    only the downscaled copies are kept).
+    sigma: width of the Gaussian, in full-resolution pixels.
+    Returns the flat field at 1/`downscale` resolution (it is smooth, so nothing is lost),
+    with mean 1 and floored at `min_gain_denominator` so the correction is capped at
+    1/min_gain_denominator. `apply_flat_field` scales it back up to the image size.
+    """
+    if isinstance(images, np.ndarray) and images.ndim == 2:  # a single image
+        images = [images]
+
+    smalls = []
+    for img in images:
+        img = np.asarray(img, dtype=np.float32)
+        shape = (max(img.shape[0] // downscale, 1), max(img.shape[1] // downscale, 1))
+        small = resize(img, shape, preserve_range=True, anti_aliasing=True)
+        # drop pixels whose block touches empty (0) pixels, so region edges do not read as dark
+        keep = resize((img > 0).astype(np.float32), shape, anti_aliasing=True) > 0.99
+        if not keep.any():
+            continue
+        keep &= small <= np.percentile(small[keep], clip_percentile)
+        small = np.where(keep, small, np.nan)
+        smalls.append(small / np.nanmedian(small))
+    if not smalls:
+        raise ValueError("no usable images to estimate the flat field from")
+
+    with warnings.catch_warnings():  # pixels masked in every image
+        warnings.simplefilter('ignore', RuntimeWarning)
+        flat = np.nanmedian(np.stack(smalls), axis=0)
+
+    weight = (~np.isnan(flat)).astype(np.float32)
+    if not weight.any():
+        raise ValueError("flat field is empty: every pixel was masked")
+    s = sigma / downscale
+    num = gaussian(np.nan_to_num(flat) * weight, sigma=s, preserve_range=True, mode='reflect')
+    den = gaussian(weight, sigma=s, preserve_range=True, mode='reflect')
+    flat = np.where(den > 1e-3, num / np.maximum(den, 1e-3), np.nan)
+
+    missing = np.isnan(flat)  # too far from any usable pixel for the Gaussian to reach
+    if missing.any():
+        nearest = distance_transform_edt(missing, return_distances=False, return_indices=True)
+        flat = flat[tuple(nearest)]
+
+    flat = flat / flat.mean()
+    return np.maximum(flat, min_gain_denominator).astype(np.float32)
+
+
+def apply_flat_field(image, flat, min_gain_denominator=0.2):
+    """Divide `image` by `flat` (from `estimate_flat_field`, any resolution), clipped to the
+    uint16 range. Empty (0) pixels stay 0."""
+    image = np.asarray(image, dtype=np.float32)
+    if flat.shape != image.shape:
+        flat = resize(flat, image.shape, preserve_range=True, anti_aliasing=False)
+    return np.clip(image / np.maximum(flat, min_gain_denominator), 0, (2**16) - 1)
 
 def fast_rolling_ball(image, radius=50, downscale=4, valid=None):
     """Rolling-ball background subtraction on a downscaled copy of `image`.

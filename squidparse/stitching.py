@@ -10,7 +10,16 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+import os
 
+from contextlib import contextmanager, redirect_stdout, redirect_stderr
+
+@contextmanager
+def suppress_output():
+    """Redirects stdout and stderr to devnull."""
+    with open(os.devnull, 'w') as devnull:
+        with redirect_stdout(devnull), redirect_stderr(devnull):
+            yield
 
 def _write_tilefusion_input(tiles, ys_um, xs_um, mpp, out_dir):
     """Write `tiles` (P, C, H, W) as the (1, P, C, H, W) zarr3 store TileFusion reads,
@@ -49,16 +58,18 @@ def _fuse(input_dir, fused_dir, nuc_channel, blend_pixels):
     Registration is cached in `metrics.json` next to `input_dir` (TileFusion.run() loads it
     when present), so only the first call per well registers the tiles.
     """
-    import tensorstore as ts
-    from tilefusion import TileFusion
-
     shutil.rmtree(fused_dir, ignore_errors=True)
     # multiscale_factors=(): skip the pyramid, only full resolution is needed
-    with TileFusion(input_dir, output_path=fused_dir, channel_to_use=nuc_channel,
-                    blend_pixels=blend_pixels, multiscale_factors=()) as tf:
-        tf.run()
-        positions = np.array(tf.tile_positions, dtype=np.float64)
-        sy, sx = tf.unpadded_shape
+    # suppress outputs because tilefusion is chatty
+    with suppress_output():
+        import tensorstore as ts
+        from tilefusion import TileFusion
+        with TileFusion(input_dir, output_path=fused_dir, channel_to_use=nuc_channel,
+                        blend_pixels=blend_pixels, multiscale_factors=()) as tf:
+            
+                tf.run()
+                positions = np.array(tf.tile_positions, dtype=np.float64)
+                sy, sx = tf.unpadded_shape
 
     fused = ts.open({"driver": "zarr3", "kvstore": {"driver": "file",
                      "path": str(Path(fused_dir) / "scale0" / "image")}}).result()

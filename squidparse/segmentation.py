@@ -44,8 +44,7 @@ def segment_plate(meta, no_cyto=True):
         for t in range(meta.T):
 
             masks[t, 0], _, _ = model.eval(
-                image[t, meta.nuc_channel],
-                cellprob_threshold=1.5
+                image[t, meta.nuc_channel]
             )
 
             if not no_cyto:
